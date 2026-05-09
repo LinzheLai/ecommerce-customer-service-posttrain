@@ -2,13 +2,14 @@
 
 本项目面向退换货、物流、商品咨询、价格优惠、赠品规则等高频电商客服场景，基于 **Qwen3-8B-Base** 搭建了一套从数据治理、SFT 指令微调、DPO 偏好对齐、批量评测到消融实验的完整后训练流水线。
 
+项目重点不是只“跑通训练”，而是围绕真实客服语料中的几个典型问题做系统迭代：
+
 - 基座模型回答冗长、答非所问、容易生成模板废话。
 - 多轮客服对话中历史信息噪声大，模型容易跟随错误上下文漂移。
 - ChatML 边界、结束符、训练和推理 system prompt 不一致时，模型容易停不下来。
 - 纯 SFT 可以显著压缩回复长度，但仍会出现“短答但业务规则错误”的问题。
 - DPO 可以进一步把模型偏向更简短、更符合客服偏好的答案。
 
-> 说明：本仓库默认不提交原始隐私数据、大模型权重和训练 checkpoint。`.gitignore` 已排除 `data/raw/`、`data/processed/` 和 `outputs/`。
 
 ## 项目结构
 
@@ -52,6 +53,8 @@ conda create -n llamafactory python=3.10 -y
 conda activate llamafactory
 pip install -r requirements.txt
 ```
+
+如果使用 QLoRA，需要确保 `bitsandbytes` 与当前 CUDA 环境匹配。
 
 ## 数据构建流程
 
@@ -305,52 +308,42 @@ python scripts/ablation/collect_dpo_ablation_results.py \
 SFT 的核心收益是格式、风格和回答边界：从“会生成客服味文本”变成“能按最后一句用户问题给出短答”。
 
 ### LoRA 消融结果
-Fixed settings: same dataset, same short-answer system prompt, completion ending with EOS, deterministic evaluation.
 
-| Experiment | Mode | Rank | Target Modules | Train Loss | Eval Loss | Exact Match | Char F1 | Train Sec | Peak Mem MB | Mem vs r16 qv | F1 vs r16 qv | QLoRA Saving |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| rank16_all_qlora | qlora | 16 | q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj | 2.76217 | 4.45413 | 0 | 0.140075 | 5243.68 | 18318 | 0.84% | 6.94% |  |
-| rank16_qv_lora | lora | 16 | q_proj,v_proj | 2.99701 | 4.05493 | 0 | 0.138571 | 2455.87 | 17372 | -4.37% | 5.80% | 0.00% |
-| rank16_qv_qlora | qlora | 16 | q_proj,v_proj | 3.07877 | 4.41348 | 0 | 0.130979 | 3711.17 | 18166 | 0.00% | 0.00% | -4.57% |
-| rank4_qv_qlora | qlora | 4 | q_proj,v_proj | 3.43189 | 4.28362 | 0 | 0.118998 | 3714.05 | 20144 | 10.89% | -9.15% |  |
-| rank64_qv_qlora | qlora | 64 | q_proj,v_proj | 2.85169 | 4.17187 | 0 | 0.125048 | 3625.07 | 19970 | 9.93% | -4.53% |  |
+显存单位按 `nvidia-smi` 采样的 MB / 1024 换算为 GB。`Peak` 是单次采样最大值，可能包含模型加载阶段的瞬时峰值；`P95` 更接近训练稳态显存，因此更适合比较 QLoRA/LoRA 的显存效率。
 
-Interview note:
+| 实验 | rank | target modules | 训练模式 | Char-F1 | Rouge-L | train loss | eval loss | 训练耗时 | Peak 单卡 GB | P95 单卡 GB | Peak 双卡总 GB | P95 双卡总 GB |
+|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| rank4_qv_qlora | 4 | q/v | QLoRA | 11.90 | 10.27 | 3.432 | 4.284 | 3714s | 19.67 | 7.53 | 37.45 | 15.01 |
+| rank16_qv_qlora | 16 | q/v | QLoRA | 13.10 | 11.20 | 3.079 | 4.413 | 3711s | 17.74 | 7.56 | 33.15 | 15.11 |
+| rank64_qv_qlora | 64 | q/v | QLoRA | 12.50 | 10.67 | 2.852 | 4.172 | 3625s | 19.50 | 7.81 | 38.80 | 15.58 |
+| rank16_all_qlora | 16 | all linear | QLoRA | 14.01 | 12.12 | 2.762 | 4.454 | 5244s | 17.89 | 8.17 | 35.72 | 16.30 |
+| rank16_qv_lora | 16 | q/v | LoRA | 13.86 | 11.87 | 2.997 | 4.055 | 2456s | 16.96 | 16.96 | 33.91 | 33.91 |
 
-- 使用 `rank16_qv_qlora` 作为主 SFT baseline.
-- Rank 消融对比 `rank4_qv_qlora`, `rank16_qv_qlora`, and `rank64_qv_qlora`.
-- Target-module 消融对比 `rank16_qv_qlora` with `rank16_all_qlora`.
-- QLoRA-vs-LoRA 对比 `rank16_qv_qlora` with `rank16_qv_lora`.
+结论：
+
 - rank=4 容量偏小，任务指标最低。
 - rank=64 训练 loss 更低，但测试 Char-F1 没有继续提升，说明更大 rank 不一定带来更好泛化。
 - all-linear 效果最好，但训练耗时明显增加。
 - rank=16 + q/v 是效果、速度和复杂度之间更稳的折中配置。
+- QLoRA 和 LoRA 对比时不能只看 `Peak`：`rank16_qv_qlora` 的 P95 单卡显存约 7.56 GB，`rank16_qv_lora` 约 16.96 GB，QLoRA 稳态单卡显存节省约 55.4%；但 LoRA 训练更快、Char-F1 略高，说明资源充足时 LoRA 可能有更好的速度和精度。
 
 ### DPO 消融结果
-Fixed settings: same SFT adapter, same DPO data schema, EOS completion ending, deterministic task evaluation.
 
-| Experiment | Group | Beta | Noise | DPO Eval Loss | Reward Acc | Pref Win | Pref vs SFT | Task EM | Task F1 | Train Sec | Peak Mem MB |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| sft_only | baseline |  | 0% |  |  | 0.134 | +0.0000 | 0 | 0.130663 |  |  |
-| beta005_clean | beta | 0.05 | 0% | 0.583488 | 0.755961 | 0.14 | +0.0060 | 0 | 0.15261 | 2976.59 | 20542 |
-| beta005_noise10 | noise | 0.05 | 10% | 0.585546 | 0.77209 | 0.14 | +0.0060 | 0 | 0.148033 | 2943.18 | 18600 |
-| beta005_noise30 | noise | 0.05 | 30% | 0.647347 | 0.65568 | 0.138 | +0.0040 | 0 | 0.136657 | 2984.75 | 20522 |
-| beta01_clean | beta | 0.1 | 0% | 0.515766 | 0.784011 | 0.142 | +0.0080 | 0 | 0.151178 | 2918.52 | 20502 |
-| beta03_clean | beta | 0.3 | 0% | 0.547496 | 0.769986 | 0.14 | +0.0060 | 0 | 0.146783 | 2909.87 | 20382 |
+| 实验 | beta | 噪声比例 | Char-F1 | Rouge-L | DPO Reward Acc | Reward Margin | 训练耗时 | Peak 单卡 GB | P95 单卡 GB | Peak 双卡总 GB | P95 双卡总 GB | 说明 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| SFT-only | - | 0% | 13.07 | 11.16 | - | - | - | - | - | - | - | SFT 基线 |
+| DPO beta=0.05 | 0.05 | 0% | 15.26 | 12.88 | 75.60% | 0.318 | 2977s | 20.06 | 8.48 | 35.94 | 16.69 | 任务指标最好 |
+| DPO beta=0.1 | 0.10 | 0% | 15.12 | 12.82 | 78.40% | 0.671 | 2919s | 20.02 | 8.50 | 37.85 | 16.78 | 偏好区分最强 |
+| DPO beta=0.3 | 0.30 | 0% | 14.68 | 12.42 | 77.00% | 1.585 | 2910s | 19.90 | 8.48 | 37.09 | 16.67 | 对齐更激进，任务指标略降 |
+| DPO beta=0.05 + 10% 噪声 | 0.05 | 10% | 14.80 | 12.59 | 77.21% | 0.302 | 2943s | 18.16 | 8.46 | 35.59 | 16.63 | 轻度噪声仍可接受 |
+| DPO beta=0.05 + 30% 噪声 | 0.05 | 30% | 13.67 | 11.71 | 65.57% | 0.137 | 2985s | 20.04 | 8.52 | 37.89 | 16.86 | 噪声明显伤害偏好学习 |
 
 结论：
 
-- 使用 sft_only 作为 baseline。
-- 所有 DPO 设置都使用相同 SFT adapter、相同 DPO data schema，并保证 completion 以 EOS 结束。
-- β 消融对比 beta005_clean, beta01_clean, beta03_clean。
-- Noise 消融对比 beta005_clean, beta005_noise10, beta005_noise30。
-- DPO 相比 SFT baseline 稳定提升 Pref Win 和 Task F1。
-- beta01_clean 的 DPO Eval Loss 最低、Reward Acc 最高、Pref Win 最高，说明 β=0.1 在 preference optimization 上最优。
-- beta005_clean 的 Task F1 最高，说明 β=0.05 在当前任务泛化上最好。
-- 10% noise 下 DPO 仍然保持较好表现，Task F1 仍明显高于 SFT baseline。
-- 30% noise 会明显损害偏好学习质量，Reward Acc 和 Task F1 都出现下降。
-- DPO 显存整体稳定在 20GB 左右，大多数实验 Peak Mem 位于 20382–20542 MB，说明 β 和 noise level 对显存影响不大。
-- 综合来看，beta005_clean 是任务指标最优配置，beta01_clean 是 preference 指标最优配置；如果追求最终 Task F1，推荐 β=0.05，如果追求更强 preference fitting，推荐 β=0.1。
+- DPO 相比 SFT-only，在任务评测 Char-F1 上从 13.07 提升到 15.26，相对提升约 16.8%。
+- `beta=0.05` 更稳，任务指标最好；`beta=0.1` 的偏好区分能力更强。
+- 偏好数据质量非常关键，30% chosen/rejected 噪声会明显拉低效果。
+- DPO 各组 P95 单卡显存稳定在约 8.46-8.52 GB，说明 beta/noise 主要影响优化目标和收敛表现，对显存占用影响很小。
 
 ## 评测指标说明
 
@@ -360,6 +353,8 @@ Fixed settings: same SFT adapter, same DPO data schema, EOS completion ending, d
 - **DPO Reward Acc**：TRL DPO 训练中的偏好准确率，判断 chosen 的 DPO reward 是否高于 rejected。
 - **Reward Margin**：chosen reward 与 rejected reward 的差值，越大说明模型越能区分好坏回复。
 - **Eval Loss**：验证集 completion token 的交叉熵损失。开放式客服回答不建议只看 loss，需要结合任务指标和 badcase。
+- **Peak GPU Memory**：训练期间 `nvidia-smi` 采样到的单卡最大显存，可能包含模型加载或权重 materialize 的短暂峰值。
+- **P95 GPU Memory**：活跃训练采样中 95 分位显存，更接近稳态训练成本，适合做 QLoRA/LoRA 显存对比。
 
 ## 关键工程设计
 
