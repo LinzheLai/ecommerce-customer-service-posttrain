@@ -405,12 +405,6 @@ python scripts/sft/plot_sft_loss.py \
   --output_png outputs/sft/qwen3_8b_rank16_qv_eos_short/loss_curve.png
 ```
 
-## 开源注意事项
-
-1. 原始客服数据可能包含用户隐私和平台数据，请不要直接提交 `data/raw/`。
-2. 训练输出和 adapter/checkpoint 体积较大，建议用 Git LFS 或 Hugging Face Hub 单独管理。
-3. 若只开源代码和实验流程，可保留小规模脱敏样例数据，并在 README 中说明完整数据不可公开。
-4. 当前 shell 脚本默认使用 `/opt/data/llz/...` 路径，复现时请修改为自己的项目路径和模型路径。
 
 ## License
 
