@@ -2,15 +2,13 @@
 
 本项目面向退换货、物流、商品咨询、价格优惠、赠品规则等高频电商客服场景，基于 **Qwen3-8B-Base** 搭建了一套从数据治理、SFT 指令微调、DPO 偏好对齐、批量评测到消融实验的完整后训练流水线。
 
-项目重点不是只“跑通训练”，而是围绕真实客服语料中的几个典型问题做系统迭代：
-
 - 基座模型回答冗长、答非所问、容易生成模板废话。
 - 多轮客服对话中历史信息噪声大，模型容易跟随错误上下文漂移。
 - ChatML 边界、结束符、训练和推理 system prompt 不一致时，模型容易停不下来。
 - 纯 SFT 可以显著压缩回复长度，但仍会出现“短答但业务规则错误”的问题。
 - DPO 可以进一步把模型偏向更简短、更符合客服偏好的答案。
 
-> 说明：本仓库默认不提交原始隐私数据、大模型权重和训练 checkpoint。`.gitignore` 已排除 `data/raw/`、`data/processed/` 和 `outputs/`。开源前请再次确认数据脱敏和授权情况。
+> 说明：本仓库默认不提交原始隐私数据、大模型权重和训练 checkpoint。`.gitignore` 已排除 `data/raw/`、`data/processed/` 和 `outputs/`。
 
 ## 项目结构
 
@@ -54,8 +52,6 @@ conda create -n llamafactory python=3.10 -y
 conda activate llamafactory
 pip install -r requirements.txt
 ```
-
-如果使用 QLoRA，需要确保 `bitsandbytes` 与当前 CUDA 环境匹配。
 
 ## 数据构建流程
 
@@ -309,38 +305,52 @@ python scripts/ablation/collect_dpo_ablation_results.py \
 SFT 的核心收益是格式、风格和回答边界：从“会生成客服味文本”变成“能按最后一句用户问题给出短答”。
 
 ### LoRA 消融结果
+Fixed settings: same dataset, same short-answer system prompt, completion ending with EOS, deterministic evaluation.
 
-| 实验 | rank | target modules | 训练模式 | Char-F1 | Rouge-L | train loss | eval loss | 训练耗时 |
-|---|---:|---|---|---:|---:|---:|---:|---:|
-| rank4_qv_qlora | 4 | q/v | QLoRA | 11.90 | 10.27 | 3.432 | 4.284 | 3714s |
-| rank16_qv_qlora | 16 | q/v | QLoRA | 13.10 | 11.20 | 3.079 | 4.413 | 3711s |
-| rank64_qv_qlora | 64 | q/v | QLoRA | 12.50 | 10.67 | 2.852 | 4.172 | 3625s |
-| rank16_all_qlora | 16 | all linear | QLoRA | 14.01 | 12.13 | 2.762 | 4.454 | 5244s |
-| rank16_qv_lora | 16 | q/v | LoRA | 13.86 | 11.87 | 2.997 | 4.055 | 2456s |
+| Experiment | Mode | Rank | Target Modules | Train Loss | Eval Loss | Exact Match | Char F1 | Train Sec | Peak Mem MB | Mem vs r16 qv | F1 vs r16 qv | QLoRA Saving |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| rank16_all_qlora | qlora | 16 | q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj | 2.76217 | 4.45413 | 0 | 0.140075 | 5243.68 | 18318 | 0.84% | 6.94% |  |
+| rank16_qv_lora | lora | 16 | q_proj,v_proj | 2.99701 | 4.05493 | 0 | 0.138571 | 2455.87 | 17372 | -4.37% | 5.80% | 0.00% |
+| rank16_qv_qlora | qlora | 16 | q_proj,v_proj | 3.07877 | 4.41348 | 0 | 0.130979 | 3711.17 | 18166 | 0.00% | 0.00% | -4.57% |
+| rank4_qv_qlora | qlora | 4 | q_proj,v_proj | 3.43189 | 4.28362 | 0 | 0.118998 | 3714.05 | 20144 | 10.89% | -9.15% |  |
+| rank64_qv_qlora | qlora | 64 | q_proj,v_proj | 2.85169 | 4.17187 | 0 | 0.125048 | 3625.07 | 19970 | 9.93% | -4.53% |  |
 
-结论：
+Interview note:
 
+- 使用 `rank16_qv_qlora` 作为主 SFT baseline.
+- Rank 消融对比 `rank4_qv_qlora`, `rank16_qv_qlora`, and `rank64_qv_qlora`.
+- Target-module 消融对比 `rank16_qv_qlora` with `rank16_all_qlora`.
+- QLoRA-vs-LoRA 对比 `rank16_qv_qlora` with `rank16_qv_lora`.
 - rank=4 容量偏小，任务指标最低。
 - rank=64 训练 loss 更低，但测试 Char-F1 没有继续提升，说明更大 rank 不一定带来更好泛化。
 - all-linear 效果最好，但训练耗时明显增加。
 - rank=16 + q/v 是效果、速度和复杂度之间更稳的折中配置。
 
 ### DPO 消融结果
+Fixed settings: same SFT adapter, same DPO data schema, EOS completion ending, deterministic task evaluation.
 
-| 实验 | Char-F1 | Rouge-L | DPO Reward Acc | Reward Margin | 说明 |
-|---|---:|---:|---:|---:|---|
-| SFT-only | 13.07 | 11.16 | - | - | SFT 基线 |
-| DPO beta=0.05 | 15.26 | 12.88 | 75.6% | 0.318 | 任务指标最好 |
-| DPO beta=0.1 | 15.12 | 12.82 | 78.4% | 0.671 | 偏好区分最强 |
-| DPO beta=0.3 | 14.68 | 12.42 | 77.0% | 1.585 | 对齐更激进，任务指标略降 |
-| DPO beta=0.05 + 10% 噪声 | 14.80 | 12.50 | 77.2% | - | 轻度噪声仍可接受 |
-| DPO beta=0.05 + 30% 噪声 | 13.67 | 11.72 | 65.6% | - | 噪声明显伤害偏好学习 |
+| Experiment | Group | Beta | Noise | DPO Eval Loss | Reward Acc | Pref Win | Pref vs SFT | Task EM | Task F1 | Train Sec | Peak Mem MB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| sft_only | baseline |  | 0% |  |  | 0.134 | +0.0000 | 0 | 0.130663 |  |  |
+| beta005_clean | beta | 0.05 | 0% | 0.583488 | 0.755961 | 0.14 | +0.0060 | 0 | 0.15261 | 2976.59 | 20542 |
+| beta005_noise10 | noise | 0.05 | 10% | 0.585546 | 0.77209 | 0.14 | +0.0060 | 0 | 0.148033 | 2943.18 | 18600 |
+| beta005_noise30 | noise | 0.05 | 30% | 0.647347 | 0.65568 | 0.138 | +0.0040 | 0 | 0.136657 | 2984.75 | 20522 |
+| beta01_clean | beta | 0.1 | 0% | 0.515766 | 0.784011 | 0.142 | +0.0080 | 0 | 0.151178 | 2918.52 | 20502 |
+| beta03_clean | beta | 0.3 | 0% | 0.547496 | 0.769986 | 0.14 | +0.0060 | 0 | 0.146783 | 2909.87 | 20382 |
 
 结论：
 
-- DPO 相比 SFT-only，在任务评测 Char-F1 上从 13.07 提升到 15.26，相对提升约 16.8%。
-- `beta=0.05` 更稳，任务指标最好；`beta=0.1` 的偏好区分能力更强。
-- 偏好数据质量非常关键，30% chosen/rejected 噪声会明显拉低效果。
+- 使用 sft_only 作为 baseline。
+- 所有 DPO 设置都使用相同 SFT adapter、相同 DPO data schema，并保证 completion 以 EOS 结束。
+- β 消融对比 beta005_clean, beta01_clean, beta03_clean。
+- Noise 消融对比 beta005_clean, beta005_noise10, beta005_noise30。
+- DPO 相比 SFT baseline 稳定提升 Pref Win 和 Task F1。
+- beta01_clean 的 DPO Eval Loss 最低、Reward Acc 最高、Pref Win 最高，说明 β=0.1 在 preference optimization 上最优。
+- beta005_clean 的 Task F1 最高，说明 β=0.05 在当前任务泛化上最好。
+- 10% noise 下 DPO 仍然保持较好表现，Task F1 仍明显高于 SFT baseline。
+- 30% noise 会明显损害偏好学习质量，Reward Acc 和 Task F1 都出现下降。
+- DPO 显存整体稳定在 20GB 左右，大多数实验 Peak Mem 位于 20382–20542 MB，说明 β 和 noise level 对显存影响不大。
+- 综合来看，beta005_clean 是任务指标最优配置，beta01_clean 是 preference 指标最优配置；如果追求最终 Task F1，推荐 β=0.05，如果追求更强 preference fitting，推荐 β=0.1。
 
 ## 评测指标说明
 
