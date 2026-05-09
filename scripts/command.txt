@@ -1,0 +1,22 @@
+# 跑完DPO后，进行推理和评估命令
+
+1）infer_sft.py
+
+python scripts/sft/infer_sft.py \
+  --base_model /opt/data/llz/hf_models/Qwen3-8B-Base \
+  --adapter_path /opt/data/llz/ecommerce-customer-service-posttrain/outputs/dpo/qwen3_8b_rank16_zero2_dpo_beta01/checkpoint-188 \
+  --test_path /opt/data/llz/ecommerce-customer-service-posttrain/data/processed_5000/taobao_messages_test.json \
+  --output_path /opt/data/llz/ecommerce-customer-service-posttrain/outputs/dpo/batch_infer/taobao_messages_test_random20_round2.json \
+  --num_samples 20 \
+  --max_new_tokens 24 \
+  --repetition_penalty 1.12 \
+  --no_repeat_ngram_size 4 \
+  --max_output_chars 56
+
+
+2）eval_sft_test.py
+
+python scripts/sft/eval_sft_test.py \
+  --adapter_path /opt/data/llz/ecommerce-customer-service-posttrain/outputs/dpo/qwen3_8b_rank16_zero2_dpo_beta01/checkpoint-188 \
+  --eval_path /opt/data/llz/ecommerce-customer-service-posttrain/data/processed_5000/taobao_messages_test.json \
+  --output_dir /opt/data/llz/ecommerce-customer-service-posttrain/outputs/dpo/eval_qwen3_8b_test_round2

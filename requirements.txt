@@ -1,0 +1,9 @@
+torch 
+transformers>=4.51.0
+datasets
+accelerate
+trl
+peft
+bitsandbytes
+sentencepiece
+deepspeed 
